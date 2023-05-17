@@ -22,9 +22,17 @@ Recent studies have emphasized the importance of applying long-term temporal con
 Our method, TemporalMaxer, results in the simplest model ever for TAL task that contains minimalist parameters and computational cost for the TAL model. TemporalMaxer is effective at modeling temporal contexts, which outperforms the robust baseline, ActionFormer, with 2.8x fewer GMACs and 3x faster inference speed. Especially, when comparing only the backbone time, our proposed method only takes 2.5 ms which is incredibly 8.0x faster than ActionFormer backbone, 20.1 ms.
 
 ## Installation
+```
+docker pull conda/miniconda3
+docker tag conda/miniconda3:latest paul/temporal-maxer:latest
+source docker_run.sh
+```
+
 #### a. Install packages
 ```bash
 conda create -n TemporalMaxer python=3.9
+source activate
+conda deactivate
 conda activate TemporalMaxer
 conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.3 -c pytorch -y
 python -m pip install -r requirements.txt
@@ -33,7 +41,8 @@ pip install -e ./
 #### b. Build NMS
 Part of NMS is implemented in C++. The code can be compiled by
 
-```shell
+```
+conda install -c conda-forge cxx-compiler
 cd ./libs/utils; python setup.py install; cd ../..
 ```
 The code should be recompiled every time you update PyTorch.
