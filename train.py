@@ -61,6 +61,7 @@ def main(args):
     cfg['loader']['num_workers'] *= len(cfg['devices'])
 
     """2. create dataset / dataloader"""
+    # usage: make_dataset(name, is_training, split, **kwargs)
     train_dataset = make_dataset(
         cfg['dataset_name'], True, cfg['train_split'], **cfg['dataset']
     )
@@ -68,7 +69,7 @@ def main(args):
     train_db_vars = train_dataset.get_attributes()
     cfg['model']['train_cfg']['head_empty_cls'] = train_db_vars['empty_label_ids']
 
-    # data loaders
+    # data loaders, usage: make_data_loader(dataset, is_training, generator, batch_size, num_workers)
     train_loader = make_data_loader(
         train_dataset, True, rng_generator, **cfg['loader'])
 
