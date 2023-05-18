@@ -3,10 +3,10 @@ dataset_name: h2o
 train_split: ['train']
 val_split: ['val']
 dataset: {
-  json_file: ./paul_dataset/h2odataset/data/action_labels/h2o_action_label.json,
-  feat_folder: ./paul_dataset/h2odataset/data/slowfast_frames,
+  json_file: /temp_maxer/paul_dataset/h2odataset/data/action_labels/h2o_action_label.json,
+  feat_folder: /temp_maxer/paul_dataset/h2odataset/data/slowfast_frames,
   file_prefix: ~,
-  file_ext: .npz,
+  file_ext: .npy,
   num_classes: 36,
   input_dim: 2304,
   feat_stride: 2,
@@ -38,6 +38,7 @@ opt: {
 }
 loader: {
   batch_size: 2,
+  num_workers: 4,
 }
 train_cfg: {
   init_loss_norm: 250,
