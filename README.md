@@ -21,12 +21,18 @@ Recent studies have emphasized the importance of applying long-term temporal con
 </div>
 Our method, TemporalMaxer, results in the simplest model ever for TAL task that contains minimalist parameters and computational cost for the TAL model. TemporalMaxer is effective at modeling temporal contexts, which outperforms the robust baseline, ActionFormer, with 2.8x fewer GMACs and 3x faster inference speed. Especially, when comparing only the backbone time, our proposed method only takes 2.5 ms which is incredibly 8.0x faster than ActionFormer backbone, 20.1 ms.
 
-## Installation
+## Installation (Docker)
+Build image from Dockerfile
 ```
-docker pull conda/miniconda3
-docker tag conda/miniconda3:latest paul/temporal-maxer:latest
+docker build -t paul/temporalmaxer:1.1 .
 source docker_run.sh
 ```
+Inside the container
+```
+pip install -e ./
+cd ./libs/utils; python setup.py install; cd ../..
+```
+## Installation (conda)
 
 #### a. Install packages
 ```bash
