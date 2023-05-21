@@ -3,8 +3,8 @@ dataset_name: h2o
 train_split: ['train']
 val_split: ['val']
 dataset: {
-  json_file: /temp_maxer/paul_dataset/h2odataset/data/action_labels/h2o_action_label.json,
-  feat_folder: /temp_maxer/paul_dataset/h2odataset/data/slowfast_frames,
+  json_file: /temporalmaxer/paul_dataset/h2odataset/data/action_labels/h2o_action_label.json,
+  feat_folder: /temporalmaxer/paul_dataset/h2odataset/data/slowfast_frames,
   file_prefix: ~,
   file_ext: .npy,
   num_classes: 36,
