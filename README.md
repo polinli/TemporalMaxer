@@ -24,7 +24,7 @@ Our method, TemporalMaxer, results in the simplest model ever for TAL task that 
 ## Installation (Docker)
 Build image from Dockerfile
 ```
-docker build -t paul/temporalmaxer:1.1 .
+docker build -t paul/temporalmaxer:latest .
 source docker_run.sh
 ```
 Inside the container
