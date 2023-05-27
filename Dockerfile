@@ -1,16 +1,12 @@
-# Use the official Docker image for CUDA 11.8 as the base image
-FROM nvidia/cuda:11.3.0-base-ubuntu20.04
-FROM python:3.9
+#python 3.8, pytorch 1.13
+FROM nvcr.io/nvidia/pytorch:22.11-py3
 
-# SYSTEM
+# SYSTEM, python
 RUN apt-get update --yes --quiet && DEBIAN_FRONTEND=noninteractive apt-get install --yes --quiet --no-install-recommends \
     wget curl vim git \
     gcc
 
 RUN pip install --upgrade pip
-
-# PyTorch, torchvision, torchaudio, and cudatoolkit
-RUN pip install torch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1
 
 # install pre-requisites
 WORKDIR /installer
