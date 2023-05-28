@@ -1,10 +1,10 @@
 model_name: "TemporalMaxerArchitecture"
 dataset_name: h2o
-train_split: ['train']
-val_split: ['val']
+train_split: ['Train']
+val_split: ['Val']
 dataset: {
-  json_file: /temporalmaxer/paul_dataset/h2odataset/data/action_labels/h2o_action_label.json,
-  feat_folder: /temporalmaxer/paul_dataset/h2odataset/data/slowfast_frames,
+  json_file: ./data/h2odataset/features/action_labels/h2o_action_label.json,
+  feat_folder: ./data/h2odataset/features/slowfast_frames,
   file_prefix: ~,
   file_ext: .npy,
   num_classes: 36,
