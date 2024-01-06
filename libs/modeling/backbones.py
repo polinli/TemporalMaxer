@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 from .models import register_backbone
-from .blocks import (MaskedConv1D, LayerNorm, TemporalMaxer)
+from .blocks import (MaskedConv1D, LayerNorm, TemporalMaxer, TemporalMiner, TemporalMaxMiner)
 
 
 @register_backbone("convPooler")
@@ -46,24 +46,32 @@ class ConvPoolerBackbone(nn.Module):
         self.embd = nn.ModuleList()
         self.embd_norm = nn.ModuleList()
         for idx in range(arch[0]):
-            n_in = n_embd if idx > 0 else n_in
+            n_in = n_embd if idx > 0 else n_in # # FIXME: was n_embd, not //2
             self.embd.append(
                 MaskedConv1D(
-                    n_in, n_embd, n_embd_ks,
+                    n_in, n_embd, n_embd_ks, # FIXME: was n_embd, not //2
                     stride=1, padding=n_embd_ks//2, bias=(not with_ln)))
 
             if with_ln:
-                self.embd_norm.append(LayerNorm(n_embd))
+                self.embd_norm.append(LayerNorm(n_embd)) # FIXME: was n_embd, not //2
             else:
                 self.embd_norm.append(nn.Identity())
 
         # main branch using TemporalMaxer
-        self.branch = nn.ModuleList()
+        self.branch_maxpool = nn.ModuleList()
         for idx in range(arch[1]):
-            self.branch.append(TemporalMaxer(kernel_size=3,
+            self.branch_maxpool.append(TemporalMaxer(kernel_size=3,
                                              stride=scale_factor,
                                              padding=1,
                                              n_embd=n_embd))
+        
+        self.branch_minpool = nn.ModuleList()
+        for idx in range(arch[1]):
+            self.branch_minpool.append(TemporalMiner(kernel_size=3,
+                                             stride=scale_factor,
+                                             padding=1,
+                                             n_embd=n_embd))
+            
         # init weights
         self.apply(self.__init_weights__)
 
@@ -91,13 +99,30 @@ class ConvPoolerBackbone(nn.Module):
             x, mask = self.embd[idx](x, mask)
             x = self.relu(self.embd_norm[idx](x))
 
+        # print("shape of x: ", x.shape)
+
         # prep for outputs
         out_feats = (x, )
+        # out_feats = (torch.cat([x, x], dim=1), )
         out_masks = (mask, )
 
+        # print("shape of feats: ", out_feats[0].shape)
+
+        x_max, mask_max = x, mask
+        x_min, mask_min = x, mask
+
         # main branch with downsampling
-        for idx in range(len(self.branch)):
-            x, mask = self.branch[idx](x, mask)
+        for idx in range(len(self.branch_maxpool)):
+            x, mask = self.branch_maxpool[idx](x, mask)
+
+            # x_max, mask_max = self.branch_maxpool[idx](x_max, mask_max)
+            # x_min, mask_min = self.branch_minpool[idx](x_min, mask_min)
+
+            # x = torch.cat([x_max, x_min], dim=1)
+            # mask = mask_max
+            
+            # print("shape of x: ", x.shape)
+
             out_feats += (x, )
             out_masks += (mask, )
 
