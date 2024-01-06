@@ -156,15 +156,34 @@ class EpicKitchensDataset(Dataset):
         # load features
         filename = os.path.join(self.feat_folder,
                                 self.file_prefix + video_item['id'] + self.file_ext)
-        with np.load(filename) as data:
-            feats = data['feats'].astype(np.float32)
+    
+        
+        if self.file_ext == '.npy':
+            feats = np.load(filename, allow_pickle=True).astype(np.float32)
+            # if empty features, create a dummy one. FIXME: this is a hack for empty features extracted from slowfast
+            if feats.shape == ():
+                feats = np.zeros((100, self.input_dim), dtype=np.float32)
+            # print("video id: ", video_item['id'])
+            # print("shape: ", feats.shape)    
+            feats = feats[::self.downsample_rate, :]
+        else:
+            with np.load(filename) as data:
+                feats = data['feats'].astype(np.float32)
+            # deal with downsampling (= increased feat stride)
+            feats = feats[::self.downsample_rate, :]
 
-        # deal with downsampling (= increased feat stride)
-        feats = feats[::self.downsample_rate, :]
+        
+        # nprint(feats.shape)
+
+        
         feat_stride = self.feat_stride * self.downsample_rate
         feat_offset = 0.5 * self.num_frames / feat_stride
         # T x C -> C x T
         feats = torch.from_numpy(np.ascontiguousarray(feats.transpose()))
+
+        # FIXME: this is a hack for epic-kitchens
+        # upsample the features to do "super-sampling"
+        # feats = torch.nn.functional.interpolate(feats.unsqueeze(0), scale_factor=2.0, mode='linear').squeeze(0)
 
         # convert time stamp (in second) into temporal feature grids
         # ok to have small negative values here
