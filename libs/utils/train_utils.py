@@ -3,6 +3,7 @@
 import os
 import time
 import pickle
+import json
 
 import numpy as np
 import random
@@ -66,7 +67,7 @@ def make_optimizer(model, optimizer_config):
     # see https://github.com/karpathy/minGPT/blob/master/mingpt/model.py#L134
     decay = set()
     no_decay = set()
-    whitelist_weight_modules = (torch.nn.Linear, torch.nn.Conv1d, MaskedConv1D)
+    whitelist_weight_modules = (torch.nn.Linear, torch.nn.Conv1d, MaskedConv1D, torch.nn.Module)
     blacklist_weight_modules = (LayerNorm, torch.nn.GroupNorm)
 
     # loop over all modules / params
@@ -82,12 +83,17 @@ def make_optimizer(model, optimizer_config):
             elif pn.endswith('weight') and isinstance(m, blacklist_weight_modules):
                 # weights of blacklist modules will NOT be weight decayed
                 no_decay.add(fpn)
-            elif pn.endswith('scale') and isinstance(m, (Scale, )):
+            elif pn.endswith('scale') and isinstance(m, (Scale, torch.nn.Module)):
                 # corner case of our scale layer
                 no_decay.add(fpn)
             elif pn.endswith('rel_pe'):
                 # corner case for relative position encoding
                 no_decay.add(fpn)
+            #FIXME: the rest unknown parameters are not decayed
+            else:
+                no_decay.add(fpn)
+                # print the type of the unknown parameter
+                print("WARNING: unknown parameter type: ", fpn)
 
     # validate that we considered every parameter
     param_dict = {pn: p for pn, p in model.named_parameters()}
@@ -440,15 +446,16 @@ def valid_one_epoch(
         if ext_score_file is not None and isinstance(ext_score_file, str):
             results = postprocess_results(results, ext_score_file)
         # call the evaluator
-        _, mAP, _ = evaluator.evaluate(results, verbose=True)
+        _, mAP, mRecall = evaluator.evaluate(results, verbose=True)
     else:
         # dump to a pickle file that can be directly used for evaluation
         with open(output_file, "wb") as f:
             pickle.dump(results, f)
+
         mAP = 0.0
 
     # log mAP to tb_writer
     if tb_writer is not None:
         tb_writer.add_scalar('validation/mAP', mAP*100, curr_epoch)
 
-    return mAP
+    return mAP, mRecall
