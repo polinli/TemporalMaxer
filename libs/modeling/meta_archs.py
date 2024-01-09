@@ -6,12 +6,14 @@ from torch.nn import functional as F
 
 from .models import register_meta_arch
 from .losses import ctr_diou_loss_1d, sigmoid_focal_loss
-from .heads import PtClsHead, PtRegHead
+from .heads import PtClsHead, PtRegHead, PtClsHead_dual, PtRegHead_dual
 from .simota_assigner import SimOTAAssigner
 
 from .models import register_meta_arch, make_backbone, make_neck, make_generator
 from .losses import ctr_diou_loss_1d, sigmoid_focal_loss
 from ..utils import batched_nms
+from .feature_augmentation import TemporalShift_random
+from .top_down_fpn import TopDownFPN
 
 
 @register_meta_arch("TemporalMaxerArchitecture")
@@ -30,6 +32,7 @@ class TemporalMaxerArchitecture(nn.Module):
                  embd_dim,              # output feat channel of the embedding network
                  embd_with_ln,          # attach layernorm to embedding network
                  fpn_dim,               # feature dim on FPN
+                 top_down_fpn_dim,      # feature dim for top-down fpn
                  fpn_with_ln,           # if to apply layer norm at the end of fpn
                  fpn_start_level,       # start level of fpn
                  head_dim,              # feature dim for head
@@ -111,10 +114,20 @@ class TemporalMaxerArchitecture(nn.Module):
             }
         )
 
+        self.top_down = TopDownFPN(
+                in_channel = fpn_dim,
+                out_channel = top_down_fpn_dim,
+                scale_factor = scale_factor,
+                **kwargs,
+        )
+
         # location generator: points
         self.point_generator = make_generator(
             'point',
             **{
+                'init_n_in': max_seq_len,
+                'scale_factor': scale_factor,
+                'num_fpn_levels': backbone_arch[-1] + 1,
                 'max_seq_len': max_seq_len * max_buffer_len_factor,
                 'fpn_strides': self.fpn_strides,
                 'regression_range': self.reg_range
@@ -123,7 +136,7 @@ class TemporalMaxerArchitecture(nn.Module):
 
         # classfication and regerssion heads
         self.cls_head = PtClsHead(
-            fpn_dim, head_dim, self.num_classes,
+            top_down_fpn_dim, head_dim, self.num_classes,
             kernel_size=head_kernel_size,
             prior_prob=self.train_cls_prior_prob,
             with_ln=head_with_ln,
@@ -131,11 +144,28 @@ class TemporalMaxerArchitecture(nn.Module):
             empty_cls=train_cfg['head_empty_cls']
         )
         self.reg_head = PtRegHead(
-            fpn_dim, head_dim, len(self.fpn_strides),
+            top_down_fpn_dim, head_dim, len(self.fpn_strides),
             kernel_size=head_kernel_size,
             num_layers=head_num_layers,
             with_ln=head_with_ln
         )
+
+        # FIXME: experiment with dual head
+        # classfication and regerssion heads
+        # self.cls_head = PtClsHead_dual(
+        #     top_down_fpn_dim, head_dim, self.num_classes,
+        #     kernel_size=head_kernel_size,
+        #     prior_prob=self.train_cls_prior_prob,
+        #     with_ln=head_with_ln,
+        #     num_layers=head_num_layers,
+        #     empty_cls=train_cfg['head_empty_cls']
+        # )
+        # self.reg_head = PtRegHead_dual(
+        #     top_down_fpn_dim, head_dim, len(self.fpn_strides),
+        #     kernel_size=head_kernel_size,
+        #     num_layers=head_num_layers,
+        #     with_ln=head_with_ln
+        # )
 
         # maintain an EMA of #foreground to stabilize the loss normalizer
         # useful for small mini-batch training
@@ -144,6 +174,7 @@ class TemporalMaxerArchitecture(nn.Module):
 
         if self.training:
             self.assigner = SimOTAAssigner(**assigner)
+            # self.temporal_shift = TemporalShift_random(n_div=3, shift_dist=1)    # temporal shift as data augmentation
 
     @property
     def device(self):
@@ -155,10 +186,13 @@ class TemporalMaxerArchitecture(nn.Module):
     def preprocessing(self, video_list, padding_val=0.0):
         """
             Generate batched features and masks from a list of dict items
+            feat: B, C, T
         """
         feats = [x['feats'] for x in video_list]
         feats_lens = torch.as_tensor([feat.shape[-1] for feat in feats])
         max_len = feats_lens.max(0).values.item()
+        # print("feats_lens: ", feats_lens)
+        # print("max_len: ", max_len)
 
         if self.training:
             assert max_len <= self.max_seq_len, "Input length must be smaller than max_seq_len during training"
@@ -167,6 +201,10 @@ class TemporalMaxerArchitecture(nn.Module):
             # batch input shape B, C, T
             batch_shape = [len(feats), feats[0].shape[0], max_len]
             batched_inputs = feats[0].new_full(batch_shape, padding_val)
+
+            # apply temporal shift as data augmentation during training
+            # batched_inputs = self.temporal_shift(batched_inputs_pad)
+
             for feat, pad_feat in zip(feats, batched_inputs):
                 pad_feat[..., :feat.shape[-1]].copy_(feat)
         else:
@@ -190,7 +228,115 @@ class TemporalMaxerArchitecture(nn.Module):
         batched_inputs = batched_inputs.to(self.device)
         batched_masks = batched_masks.unsqueeze(1).to(self.device)
 
+        # print("batched_inputs: ", batched_inputs.shape)
+        # print("batched_masks: ", batched_masks.shape)
+
         return batched_inputs, batched_masks
+       
+    @torch.no_grad()
+    def label_points_actionformer(self, points, gt_segments, gt_labels):
+        # concat points on all fpn levels List[T x 4] -> F T x 4
+        # This is shared for all samples in the mini-batch
+        num_levels = len(points)
+        concat_points = torch.cat(points, dim=0)
+        gt_cls, gt_offset = [], []
+
+        # loop over each video sample
+        for gt_segment, gt_label in zip(gt_segments, gt_labels):
+            cls_targets, reg_targets = self.label_points_single_video_actionformer(
+                concat_points, gt_segment, gt_label
+            )
+            # append to list (len = # images, each of size FT x C)
+            gt_cls.append(cls_targets)
+            gt_offset.append(reg_targets)
+
+        return gt_cls, gt_offset
+    
+    @torch.no_grad()
+    def label_points_single_video_actionformer(self, concat_points, gt_segment, gt_label):
+        # concat_points : F T x 4 (t, regression range, stride)
+        # gt_segment : N (#Events) x 2
+        # gt_label : N (#Events) x 1
+        num_pts = concat_points.shape[0]
+        num_gts = gt_segment.shape[0]
+
+        # corner case where current sample does not have actions
+        if num_gts == 0:
+            cls_targets = gt_segment.new_full((num_pts, self.num_classes), 0)
+            reg_targets = gt_segment.new_zeros((num_pts, 2))
+            return cls_targets, reg_targets
+
+        # compute the lengths of all segments -> F T x N
+        lens = gt_segment[:, 1] - gt_segment[:, 0]
+        lens = lens[None, :].repeat(num_pts, 1)
+
+        # compute the distance of every point to each segment boundary
+        # auto broadcasting for all reg target-> F T x N x2
+        gt_segs = gt_segment[None].expand(num_pts, num_gts, 2)
+        left = concat_points[:, 0, None] - gt_segs[:, :, 0]
+        right = gt_segs[:, :, 1] - concat_points[:, 0, None]
+        reg_targets = torch.stack((left, right), dim=-1)
+
+        if self.train_center_sample == 'radius':
+            # center of all segments F T x N
+            center_pts = 0.5 * (gt_segs[:, :, 0] + gt_segs[:, :, 1])
+            # center sampling based on stride radius
+            # compute the new boundaries:
+            # concat_points[:, 3] stores the stride
+            t_mins = \
+                center_pts - concat_points[:, 3, None] * self.train_center_sample_radius
+            t_maxs = \
+                center_pts + concat_points[:, 3, None] * self.train_center_sample_radius
+            # prevent t_mins / maxs from over-running the action boundary
+            # left: torch.maximum(t_mins, gt_segs[:, :, 0])
+            # right: torch.minimum(t_maxs, gt_segs[:, :, 1])
+            # F T x N (distance to the new boundary)
+            cb_dist_left = concat_points[:, 0, None] \
+                           - torch.maximum(t_mins, gt_segs[:, :, 0])
+            cb_dist_right = torch.minimum(t_maxs, gt_segs[:, :, 1]) \
+                            - concat_points[:, 0, None]
+            # F T x N x 2
+            center_seg = torch.stack(
+                (cb_dist_left, cb_dist_right), -1)
+            # F T x N
+            inside_gt_seg_mask = center_seg.min(-1)[0] > 0
+        else:
+            # inside an gt action
+            inside_gt_seg_mask = reg_targets.min(-1)[0] > 0
+
+        # limit the regression range for each location
+        max_regress_distance = reg_targets.max(-1)[0]
+        # F T x N
+        inside_regress_range = torch.logical_and(
+            (max_regress_distance >= concat_points[:, 1, None]),
+            (max_regress_distance <= concat_points[:, 2, None])
+        )
+
+        # if there are still more than one actions for one moment
+        # pick the one with the shortest duration (easiest to regress)
+        lens.masked_fill_(inside_gt_seg_mask==0, float('inf'))
+        lens.masked_fill_(inside_regress_range==0, float('inf'))
+        # F T x N -> F T
+        min_len, min_len_inds = lens.min(dim=1)
+
+        # corner case: multiple actions with very similar durations (e.g., THUMOS14)
+        min_len_mask = torch.logical_and(
+            (lens <= (min_len[:, None] + 1e-3)), (lens < float('inf'))
+        ).to(reg_targets.dtype)
+
+        # cls_targets: F T x C; reg_targets F T x 2
+        gt_label_one_hot = F.one_hot(
+            gt_label, self.num_classes
+        ).to(reg_targets.dtype)
+        cls_targets = min_len_mask @ gt_label_one_hot
+        # to prevent multiple GT actions with the same label and boundaries
+        cls_targets.clamp_(min=0.0, max=1.0)
+        # OK to use min_len_inds
+        reg_targets = reg_targets[range(num_pts), min_len_inds]
+        # normalization based on stride
+        reg_targets /= concat_points[:, 3, None]
+
+        return cls_targets, reg_targets
 
     @torch.no_grad()
     def label_points_single_video(self, concat_points, gt_segment,
@@ -237,6 +383,11 @@ class TemporalMaxerArchitecture(nn.Module):
                                                  out_offsets[_idx], gt_segments[_idx],
                                                  gt_labels[_idx], batch_fpn_masks[_idx])
             assign_results.append(assign_result)
+
+        # delete unused variables to save memory
+        del out_cls_logits, out_offsets, batch_fpn_masks
+        torch.cuda.empty_cache()
+        
         # get target
         reg_targets = []
         cls_targets = []
@@ -273,6 +424,11 @@ class TemporalMaxerArchitecture(nn.Module):
         # (shared across all samples in the mini-batch)
         points = self.point_generator(fpn_feats)
 
+        # FIXME: Top-Dowm FPN
+        fpn_feats, fpn_masks = self.top_down(fpn_feats, fpn_masks)
+
+        # if self.training: feats = self.temporal_shift(feats)
+
         # out_cls: List[B, #cls + 1, T_i]
         out_cls_logits = self.cls_head(fpn_feats, fpn_masks)
         # out_offset: List[B, 2, T_i]
@@ -285,6 +441,10 @@ class TemporalMaxerArchitecture(nn.Module):
         out_offsets = [x.permute(0, 2, 1) for x in out_offsets]
         # fpn_masks: F list[B, 1, T_i] -> F List[B, T_i]
         fpn_masks = [x.squeeze(1) for x in fpn_masks]
+
+        # delete unused variables to save memory
+        del feats, masks, fpn_feats, batched_inputs, batched_masks
+        torch.cuda.empty_cache()
 
         # return loss during training
         if self.training:
@@ -308,6 +468,11 @@ class TemporalMaxerArchitecture(nn.Module):
             reg_targets = targets['reg_targets']
             cls_targets = targets['cls_targets']
             weights = targets['weights']
+
+            # delete unused variables to save memory
+            del points, batch_fpn_masks, gt_segments, gt_labels, targets
+            torch.cuda.empty_cache()
+
             # compute the loss and return
             losses = self.losses(fpn_masks, out_cls_logits,
                                  out_offsets, cls_targets,
@@ -315,6 +480,66 @@ class TemporalMaxerArchitecture(nn.Module):
             return losses
 
         else:
+            # FIXME: just for experiment
+            test_gt_cls_reg = False
+            if test_gt_cls_reg:
+                '''
+                overwrite the GT out_cls_logits or out_offsets
+                to test the performance of cls/reg heads
+                '''
+                print("test_gt_cls_reg")
+
+                gt_segments = [x['segments'].to(self.device) for x in video_list]
+                gt_labels = [x['labels'].to(self.device) for x in video_list]
+
+                # build valid mask
+                batch_fpn_masks = torch.cat(fpn_masks, dim=1)
+                batch_size = len(video_list)
+
+                # FPN level --> video level
+                out_cls_logits_ = torch.cat(out_cls_logits, dim=1)
+                points_ = torch.cat(points, dim=0)
+                out_offsets_ = torch.cat(out_offsets, dim=1)
+                targets = self.get_target(out_cls_logits_, points_, out_offsets_,
+                                        gt_segments, gt_labels, batch_fpn_masks,
+                                        batch_size)
+                reg_targets = targets['reg_targets']
+                cls_targets = targets['cls_targets']
+
+                # overwrite the GT out_cls_logits or out_offsets
+                
+                # debug: print the shape of out_cls_logits and cls_targets
+                # print("out_cls_logits len: ", len(out_cls_logits))
+                # print("cls_targets len: ", len(cls_targets))
+                # print("out_cls_logits shape: ", out_cls_logits[0].shape)
+                # print("cls_targets shape: ", cls_targets[0].shape)
+                # for i in range(len(out_cls_logits)):
+                #     print("out_cls_logits[{}] shape: ".format(i), out_cls_logits[i].shape)
+
+                # print("reg_targets len: ", len(reg_targets))
+                # print("reg_targets shape: ", reg_targets[0].shape)
+                
+                # use out_cls_logits[0].shape[1] to create split_size
+                seq_max_len = out_cls_logits[0].shape[1]
+                split_size = []
+                for i in range(0, 6):
+                    split_size.append(seq_max_len // (2 ** i))
+
+                split_size = tuple(split_size)
+                
+                # split into length according to the level of FPN
+                out_offsets = reg_targets[0].unsqueeze(0).split(split_size, dim=1)
+                out_cls_logits = cls_targets[0].unsqueeze(0).split(split_size, dim=1)
+
+                # delete unused variables
+                del out_offsets_
+                del points_
+                del out_cls_logits_ 
+                del targets
+                del reg_targets 
+                del cls_targets
+                torch.cuda.empty_cache()            
+            
             # decode the actions (sigmoid / stride, etc)
             results = self.inference(
                 video_list, points, fpn_masks,
